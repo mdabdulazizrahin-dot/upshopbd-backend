@@ -197,7 +197,7 @@ class GoogleSheetSyncController extends Controller
                     $images = preg_split('/[,\|\n]+/', $item['image_url']);
                     $sortOrder = 0;
                     foreach ($images as $imgUrl) {
-                        $imgUrl = trim($imgUrl);
+                        $imgUrl = $this->normalizeImageUrl($imgUrl);
                         if (empty($imgUrl)) continue;
 
                         $hasImg = ProductImage::where('product_id', $product->id)
@@ -376,5 +376,22 @@ class GoogleSheetSyncController extends Controller
             'headers' => array_values(array_unique($mappedHeaders)),
             'rows' => $rows,
         ];
+    }
+
+    /**
+     * Normalize image URLs (convert Google Drive and Dropbox share links).
+     */
+    private function normalizeImageUrl(string $url): string
+    {
+        $url = trim($url);
+        // Convert Google Drive share link: https://drive.google.com/file/d/FILE_ID/view... -> direct viewable URL
+        if (preg_match('/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/', $url, $matches)) {
+            return "https://drive.google.com/uc?export=view&id=" . $matches[1];
+        }
+        // Convert Dropbox link: ?dl=0 -> ?raw=1
+        if (str_contains($url, 'dropbox.com') && str_contains($url, '?dl=0')) {
+            return str_replace('?dl=0', '?raw=1', $url);
+        }
+        return $url;
     }
 }
