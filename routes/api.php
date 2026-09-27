@@ -18,6 +18,7 @@ use App\Http\Controllers\HomeSectionController;
 use App\Http\Controllers\VisualSearchController;
 use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\StaffController;
+use App\Http\Controllers\GoogleSheetSyncController;
 
 // Public routes
 Route::get('/track-order', [OrderController::class, 'trackByPhone']);
@@ -121,4 +122,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/admin/staff', [StaffController::class, 'store']);
     Route::put('/admin/staff/{id}', [StaffController::class, 'update']);
     Route::delete('/admin/staff/{id}', [StaffController::class, 'destroy']);
+
+    // Google Sheets Sync & Bulk Product Import
+    Route::get('/admin/google-sheets/settings', [GoogleSheetSyncController::class, 'getSettings']);
+    Route::post('/admin/google-sheets/preview', [GoogleSheetSyncController::class, 'preview']);
+    Route::post('/admin/google-sheets/sync', [GoogleSheetSyncController::class, 'sync']);
 });

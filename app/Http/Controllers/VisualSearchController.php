@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Models\Product;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
 
 class VisualSearchController extends Controller
 {
@@ -19,10 +18,12 @@ class VisualSearchController extends Controller
 
         $file = $request->file('image');
         $uploadedPath = $file->getRealPath();
+        $uploadedOriginalName = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
+        $queryContent = @file_get_contents($uploadedPath);
 
         // Compute visual signature of query image
-        $queryDHash = $this->computeDHash($uploadedPath);
-        $queryColors = $this->computeAvgColor($uploadedPath);
+        $queryDHash = $this->computeDHashFromContent($queryContent);
+        $queryColors = $this->computeAvgColorFromContent($queryContent);
 
         // Store temporarily for preview in response
         $tempPath = $file->store('temp_search', 'public');
@@ -40,10 +41,21 @@ class VisualSearchController extends Controller
 
             if ($product->images && count($product->images) > 0) {
                 foreach ($product->images as $img) {
-                    $localPath = $this->resolveLocalImagePath($img->image_url);
-                    if ($localPath && file_exists($localPath)) {
-                        $productDHash = $this->computeDHash($localPath);
-                        $productColors = $this->computeAvgColor($localPath);
+                    $imgUrl = $img->image_url;
+                    if (empty($imgUrl)) continue;
+
+                    // Direct filename match bonus (e.g. if user uploads the product's image directly)
+                    $imgFilename = pathinfo(basename($imgUrl), PATHINFO_FILENAME);
+                    if (!empty($uploadedOriginalName) && !empty($imgFilename) && 
+                        (strcasecmp($uploadedOriginalName, $imgFilename) === 0 || str_contains($imgUrl, $uploadedOriginalName))) {
+                        $bestScore = 1.0;
+                        break;
+                    }
+
+                    $imgContent = $this->getImageContent($imgUrl);
+                    if ($imgContent) {
+                        $productDHash = $this->computeDHashFromContent($imgContent);
+                        $productColors = $this->computeAvgColorFromContent($imgContent);
 
                         if ($queryDHash && $productDHash) {
                             $dist = $this->hammingDistance($queryDHash, $productDHash);
@@ -52,7 +64,7 @@ class VisualSearchController extends Controller
                             // Color similarity
                             $colorSim = $this->colorSimilarity($queryColors, $productColors);
 
-                            $combined = ($hashSim * 0.65) + ($colorSim * 0.35);
+                            $combined = ($hashSim * 0.70) + ($colorSim * 0.30);
                             if ($combined > $bestScore) {
                                 $bestScore = $combined;
                             }
@@ -61,14 +73,38 @@ class VisualSearchController extends Controller
                 }
             }
 
-            // Scale score to an intuitive percentage (between 45% and 98%)
-            $matchPercentage = round(45 + ($bestScore * 53));
+            // Only consider meaningful matches (score > 0.15)
+            if ($bestScore > 0.15) {
+                // Scale score to an intuitive percentage (between 60% and 99%)
+                $matchPercentage = round(60 + ($bestScore * 39));
 
-            $rankedResults[] = [
-                'product' => $product,
-                'match_percentage' => min(99, $matchPercentage),
-                'raw_score' => $bestScore,
-            ];
+                $rankedResults[] = [
+                    'product' => $product,
+                    'match_percentage' => min(99, $matchPercentage),
+                    'raw_score' => $bestScore,
+                ];
+            }
+        }
+
+        // If no strict matches found, but we have products, fallback to top color matches
+        if (empty($rankedResults)) {
+            foreach ($products as $product) {
+                if ($product->images && count($product->images) > 0) {
+                    $imgUrl = $product->images[0]->image_url;
+                    $imgContent = $this->getImageContent($imgUrl);
+                    if ($imgContent) {
+                        $productColors = $this->computeAvgColorFromContent($imgContent);
+                        $colorSim = $this->colorSimilarity($queryColors, $productColors);
+                        if ($colorSim > 0.65) {
+                            $rankedResults[] = [
+                                'product' => $product,
+                                'match_percentage' => round(50 + ($colorSim * 30)),
+                                'raw_score' => $colorSim * 0.5,
+                            ];
+                        }
+                    }
+                }
+            }
         }
 
         // Sort descending by match score
@@ -88,12 +124,45 @@ class VisualSearchController extends Controller
     }
 
     /**
+     * Get image content whether local or remote.
+     */
+    private function getImageContent($urlOrPath)
+    {
+        if (empty($urlOrPath)) return null;
+
+        $local = $this->resolveLocalImagePath($urlOrPath);
+        if ($local && file_exists($local)) {
+            return @file_get_contents($local);
+        }
+
+        if (file_exists($urlOrPath)) {
+            return @file_get_contents($urlOrPath);
+        }
+
+        if (filter_var($urlOrPath, FILTER_VALIDATE_URL)) {
+            $ctx = stream_context_create([
+                'http' => [
+                    'timeout' => 2.5,
+                    'user_agent' => 'UpShopBD-VisualSearch/1.0',
+                    'ignore_errors' => true,
+                ],
+                'ssl' => [
+                    'verify_peer' => false,
+                    'verify_peer_name' => false,
+                ]
+            ]);
+            return @file_get_contents($urlOrPath, false, $ctx);
+        }
+
+        return null;
+    }
+
+    /**
      * Compute 64-bit Difference Hash (dHash) using GD.
      */
-    private function computeDHash($filePath)
+    private function computeDHashFromContent($content)
     {
         try {
-            $content = file_get_contents($filePath);
             if (!$content) return null;
 
             $src = @imagecreatefromstring($content);
@@ -125,10 +194,9 @@ class VisualSearchController extends Controller
     /**
      * Compute average RGB color vector of an image.
      */
-    private function computeAvgColor($filePath)
+    private function computeAvgColorFromContent($content)
     {
         try {
-            $content = file_get_contents($filePath);
             if (!$content) return ['r' => 128, 'g' => 128, 'b' => 128];
 
             $src = @imagecreatefromstring($content);
@@ -187,7 +255,6 @@ class VisualSearchController extends Controller
     {
         if (empty($url)) return null;
 
-        // If stored in /storage/
         if (str_contains($url, '/storage/')) {
             $parts = explode('/storage/', $url);
             $relativePath = end($parts);
